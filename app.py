@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
@@ -17,7 +17,6 @@ class VideoApp:
         self.root = root
         self.root.title("Counting Vehicle App")
         
-
         # Video variables
         self.cap = None
         self.video_label = tk.Label(root)
@@ -84,10 +83,11 @@ class VideoApp:
 
     def run_counting(self, counting_window):
         self.cap = cv2.VideoCapture(self.file_path)
-        vehicle_count_window = CountingWindow(counting_window, self.cap, self.mask_editor.saved_mask, self.on_counting_window_close)
+        vehicle_count_window = CountingWindow(counting_window, self.cap, self.mask_editor.saved_mask)
 
         # Wait for the counting window to close
-        counting_window.wait_window(vehicle_count_window.root)
+        counting_window.wait_window(vehicle_count_window.window)
+        self.on_counting_window_close()
 
     def on_counting_window_close(self):
         self.cap.release()  # Release the video capture when the counting window is closed
@@ -189,32 +189,122 @@ class CountingWindow:
         self.video_cap = video_cap
         self.mask = mask
 
-        self.vehicle_count_label = tk.Label(root, text="")
+        # Add a notebook to have multiple tabs
+        self.notebook = ttk.Notebook(window)
+        self.notebook.pack(fill='both', expand=True)
+
+        # Tab 1: Parameters Input
+        self.tab1 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab1, text='Parameters')
+
+        self.pixel_to_km_label = tk.Label(self.tab1, text="Pixel to Km ratio:")
+        self.pixel_to_km_label.grid(row=0, column=0)
+
+        self.pixel_to_km_entry = tk.Entry(self.tab1)
+        self.pixel_to_km_entry.grid(row=0, column=1)
+        self.pixel_to_km_entry.bind('<FocusOut>', self.validate_pixel_to_km)
+
+        self.start_button = tk.Button(self.tab1, text="Start", command=self.start_counting)
+        self.start_button.grid(row=1, column=0, columnspan=2)
+        self.start_button["state"] = "disabled"  # Initially, the button is disabled
+
+        self.disclaimer_label = tk.Label(self.tab1, text="If you can't hit the Start button after entering parameters, press TAB key")
+        self.disclaimer_label.grid(row=2, column=0, columnspan=2, pady=10)
+
+        # Tab 2: Vehicle Counting
+        self.tab2 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab2, text='Vehicle Counting')
+
+        self.vehicle_count_label = tk.Label(self.tab2, text="")
         self.vehicle_count_label.pack()
 
-        self.count_vehicles()
+        self.save_button = tk.Button(self.tab2, text="Save Vehicle Info", command=self.save_vehicle_info)
+        self.save_button.pack()
 
-    def count_vehicles(self):
-        n_vehicles = vehicle_counter(self.video_cap, self.mask)
+        self.vehicle_info_text = tk.Text(self.tab2, height=10, width=50)
+        self.vehicle_info_text.pack()
 
-    def count_vehicles(self):
-        # Call your custom vehicle_counter algorithm with the video_cap and mask
-        vehicle_count = vehicle_counter(self.video_cap, self.mask)
+        # Bind event to show disclaimer when switching to the Parameters tab
+        self.notebook.bind("<<NotebookTabChanged>>", self.show_disclaimer)
+
+
+    def validate_pixel_to_km(self, event):
+        try:
+            # Try converting the input to a float
+            float_value = float(self.pixel_to_km_entry.get())
+            if float_value > 0:
+                # Enable the "Start" button if a valid value is entered
+                self.start_button["state"] = "normal"
+            else:
+                # Disable the "Start" button for invalid values
+                self.start_button["state"] = "disabled"
+        except ValueError:
+            # Disable the "Start" button for non-numeric input
+            self.start_button["state"] = "disabled"
+
+    def start_counting(self):
+        # Get the user-provided Pixel to Km ratio
+        pixel_to_km_value = self.pixel_to_km_entry.get()
+
+        if not pixel_to_km_value or not pixel_to_km_value.replace(".", "").isdigit():
+            # Show a message to the user to fill in the parameters
+            tk.messagebox.showwarning("Missing Parameters", "Please fill in the Pixel to Km ratio.")
+            return
+
+        # Convert the ratio to a float
+        pixel_to_km_ratio = float(pixel_to_km_value)
+
+        # Call your custom vehicle_counter algorithm with the video_cap, mask, and ratio
+        print("checking cap")
+        # Check if camera opened successfully
+        if (self.video_cap.isOpened() == False):
+            print(self.video_cap)
+            raise RuntimeError("Error opening video file in CountingWindow")
+
+        vehicle_count, vehicle_info = vehicle_counter2(self.video_cap, self.mask, pixel_to_km_ratio)
         self.vehicle_count_label.config(text=f"{vehicle_count} vehicles counted!")
 
+        # Store the vehicle info for later use
+        self.vehicle_info = vehicle_info
 
-    def __init__(self, root, video_cap, mask, on_close_callback):
-        self.root = root
-        self.root.title("Vehicle Counting Window")
+        # Display a sample of the vehicle info in the Text widget
+        sample_info = vehicle_info.head().to_string(index=False)
+        self.vehicle_info_text.insert(tk.END, sample_info)
 
-        self.video_cap = video_cap
-        self.mask = mask
-        self.on_close_callback = on_close_callback
+        # Enable the Save button
+        self.save_button["state"] = "normal"
 
-        self.vehicle_count_label = tk.Label(root, text="")
-        self.vehicle_count_label.pack()
+    def save_vehicle_info(self):
+        try:
+            # Ask the user for the file name to save the CSV
+            file_path = tk.filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
 
-        self.count_vehicles()
+            if file_path:
+                # Save the vehicle info to the CSV file
+                self.vehicle_info.to_csv(file_path, index=False)
+                tk.messagebox.showinfo("Save Successful", "Vehicle info saved successfully!")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"An error occurred: {str(e)}")
+
+
+# class CountingWindow:
+#     def __init__(self, window, video_cap, mask, on_counting_window_close):
+#         self.window = window
+#         self.window.title("Vehicle Counting Window")
+
+#         self.video_cap = video_cap
+#         self.mask = mask
+
+#         self.vehicle_count_label = tk.Label(window, text="")
+#         self.vehicle_count_label.pack()
+
+#         self.count_vehicles()
+#         on_counting_window_close()
+
+#     def count_vehicles(self):
+#         # Call your custom vehicle_counter algorithm with the video_cap and mask
+#         vehicle_count = vehicle_counter2(self.video_cap, self.mask)
+#         self.vehicle_count_label.config(text=f"{vehicle_count} vehicles counted!")
 
 if __name__ == "__main__":
     root = tk.Tk()
