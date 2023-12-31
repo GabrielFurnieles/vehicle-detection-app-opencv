@@ -6,3 +6,10 @@ data/
 
 # Tests
 tests.ipynb
+
+# memoria
+memoria.docx
+memoria.pdf
+
+# pesos modelos
+*.pt

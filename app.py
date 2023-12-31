@@ -26,7 +26,7 @@ class VideoApp:
         self.start_counting_btn = tk.Button(root, text="Start Counting", command=self.start_counting, state=tk.DISABLED)
         self.start_counting_btn.pack(side=tk.LEFT, padx=10)
 
-        self.mask_video_btn = tk.Button(root, text="Mask Video", command=self.mask_video)
+        self.mask_video_btn = tk.Button(root, text="Mask Video", command=self.mask_video, state=tk.DISABLED)
         self.mask_video_btn.pack(side=tk.RIGHT, padx=10)
 
         # Loading field
@@ -44,6 +44,7 @@ class VideoApp:
             self.ret_first, self.first_frame = self.cap.read()
             self.show_frame(first=True)
             self.start_counting_btn.config(state=tk.DISABLED)
+            self.mask_video_btn.config(state=tk.NORMAL)  # Enable the Mask Video button
 
     def show_frame(self, first=False):
         if first:
@@ -60,19 +61,21 @@ class VideoApp:
         else:
             self.loading_label.config(text="End of video reached", fg="red")
 
-    def mask_video(self):
-        # Implement your video masking logic here
-        print("Video masked")
-        self.mask_set = True
-        self.start_counting_btn.config(state=tk.NORMAL)  # Enable the Start Counting button
-
-        self.mask_editor = MaskEditor(self.first_frame)
+    def mask_video(self):   
+        maskeditor_window = tk.Toplevel(self.root)
+        mask_window = PreliminaryMaskWindow(root, maskeditor_window, self.first_frame)
+        self.root.wait_window(mask_window.window)
+        
+        self.mask_editor = mask_window.masker
         self.root.wait_window(self.mask_editor.window)
+
+        if self.mask_editor.saved_mask is not None:
+            self.mask_set = True
+            self.start_counting_btn.config(state=tk.NORMAL)  # Enable the Start Counting button
 
     def start_counting(self):
         if self.mask_set or self.mask_editor.saved_mask is not None:
             counting_window = tk.Toplevel(self.root)
-            counting_window.geometry("640x480")  # Adjust the size as needed
 
             counting_window_label = tk.Label(counting_window, text="Vehicle Counting in Progress...")
             counting_window_label.pack()
@@ -92,10 +95,67 @@ class VideoApp:
     def on_counting_window_close(self):
         self.cap.release()  # Release the video capture when the counting window is closed
 
+class PreliminaryMaskWindow:
+    def __init__(self, root, window, first_frame):
+        self.root = root
+        self.window = window
+        self.window.title("Choose Mask Option")
+        self.window.geometry("300x200")
+
+        self.first_frame = first_frame
+        self.masker = None
+
+        tk.Label(self.window, text="Choose an option:").pack(pady=10)
+
+        tk.Button(self.window, text="Use Pre-built Mask", command=self.use_prebuilt_mask).pack(pady=5)
+        tk.Button(self.window, text="Draw a New Mask", command=self.draw_new_mask).pack(pady=5)
+
+    def use_prebuilt_mask(self):
+        file_path = filedialog.askopenfilename(defaultextension=".png", filetypes=[("PNG files", "*.png")])
+
+        if file_path:
+            self.masker = MaskPreview(self.root, file_path, self.first_frame)
+            self.window.destroy()
+
+    def draw_new_mask(self):
+        self.masker = MaskEditor(self.root, self.first_frame)
+        self.window.destroy()
+
+class MaskPreview:
+    def __init__(self, root, mask_path, first_frame):
+        self.window = tk.Toplevel(root)
+        self.window.title("Mask Preview")
+
+        # Read frame and mask
+        self.frame = first_frame
+        self.mask_path = mask_path
+        self.saved_mask = np.asarray(Image.open(self.mask_path))
+        assert self.frame.shape == self.saved_mask.shape, f"Invalid mask, frame shape {img.shape} and mask shape {self.saved_mask.shape} doesn't match"
+
+        # Convert frame and mask to RGB
+        frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+        saved_mask_rgb = cv2.cvtColor(self.saved_mask, cv2.COLOR_BGR2RGB)
+
+        # Combine frame and mask
+        combined_image = cv2.addWeighted(frame_rgb, 1, saved_mask_rgb, 0.5, 0)
+        img = Image.fromarray(combined_image)
+        self.tk_image = ImageTk.PhotoImage(img)
+
+        # Display combined image
+        self.canvas = tk.Canvas(self.window, width=img.width, height=img.height)
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        self.canvas.pack()
+
+        # Button to use mask
+        tk.Button(self.window, text="Use This Mask", command=self.use_this_mask).pack(pady=10)
+
+    def use_this_mask(self):
+        self.window.destroy()
+
 class MaskEditor:
-    def __init__(self, frame):
+    def __init__(self, root, frame):
         self.frame = frame
-        self.window = tk.Toplevel()
+        self.window = tk.Toplevel(root)
         self.window.title("Mask Editor")
 
         self.canvas = tk.Canvas(self.window)
@@ -149,6 +209,14 @@ class MaskEditor:
 
     def save_mask(self):
         self.saved_mask = np.copy(self.mask)
+
+        # Ask the user for the file path to save the mask
+        file_path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png")])
+
+        if file_path:
+            image = Image.fromarray(self.mask)
+            image.save(file_path)
+
         self.window.destroy()
 
     def paint(self, event):
@@ -185,83 +253,29 @@ class CountingWindow:
     def __init__(self, window, video_cap, mask):
         self.window = window
         self.window.title("Vehicle Counting Window")
+        self.window.geometry("640x480")
 
         self.video_cap = video_cap
         self.mask = mask
 
-        # Add a notebook to have multiple tabs
-        self.notebook = ttk.Notebook(window)
-        self.notebook.pack(fill='both', expand=True)
+        # Instantiate tracker
+        self.tracker = tracker.VehicleTracker()
 
-        # Tab 1: Parameters Input
-        self.tab1 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab1, text='Parameters')
-
-        self.pixel_to_km_label = tk.Label(self.tab1, text="Pixel to Km ratio:")
-        self.pixel_to_km_label.grid(row=0, column=0)
-
-        self.pixel_to_km_entry = tk.Entry(self.tab1)
-        self.pixel_to_km_entry.grid(row=0, column=1)
-        self.pixel_to_km_entry.bind('<FocusOut>', self.validate_pixel_to_km)
-
-        self.start_button = tk.Button(self.tab1, text="Start", command=self.start_counting)
-        self.start_button.grid(row=1, column=0, columnspan=2)
-        self.start_button["state"] = "disabled"  # Initially, the button is disabled
-
-        self.disclaimer_label = tk.Label(self.tab1, text="If you can't hit the Start button after entering parameters, press TAB key")
-        self.disclaimer_label.grid(row=2, column=0, columnspan=2, pady=10)
-
-        # Tab 2: Vehicle Counting
-        self.tab2 = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab2, text='Vehicle Counting')
-
-        self.vehicle_count_label = tk.Label(self.tab2, text="")
+        self.vehicle_count_label = tk.Label(self.window, text="")
         self.vehicle_count_label.pack()
 
-        self.save_button = tk.Button(self.tab2, text="Save Vehicle Info", command=self.save_vehicle_info)
+        self.save_button = tk.Button(self.window, text="Save Vehicle Info", command=self.save_vehicle_info)
         self.save_button.pack()
 
-        self.vehicle_info_text = tk.Text(self.tab2, height=10, width=50)
+        self.vehicle_info_text = tk.Text(self.window, height=10, width=50)
         self.vehicle_info_text.pack()
 
-        # Bind event to show disclaimer when switching to the Parameters tab
-        self.notebook.bind("<<NotebookTabChanged>>", self.show_disclaimer)
-
-
-    def validate_pixel_to_km(self, event):
-        try:
-            # Try converting the input to a float
-            float_value = float(self.pixel_to_km_entry.get())
-            if float_value > 0:
-                # Enable the "Start" button if a valid value is entered
-                self.start_button["state"] = "normal"
-            else:
-                # Disable the "Start" button for invalid values
-                self.start_button["state"] = "disabled"
-        except ValueError:
-            # Disable the "Start" button for non-numeric input
-            self.start_button["state"] = "disabled"
+        self.start_counting()
 
     def start_counting(self):
-        # Get the user-provided Pixel to Km ratio
-        pixel_to_km_value = self.pixel_to_km_entry.get()
+        vehicle_count, vehicle_info = self.tracker.track_video(self.video_cap, self.mask)
 
-        if not pixel_to_km_value or not pixel_to_km_value.replace(".", "").isdigit():
-            # Show a message to the user to fill in the parameters
-            tk.messagebox.showwarning("Missing Parameters", "Please fill in the Pixel to Km ratio.")
-            return
-
-        # Convert the ratio to a float
-        pixel_to_km_ratio = float(pixel_to_km_value)
-
-        # Call your custom vehicle_counter algorithm with the video_cap, mask, and ratio
-        print("checking cap")
-        # Check if camera opened successfully
-        if (self.video_cap.isOpened() == False):
-            print(self.video_cap)
-            raise RuntimeError("Error opening video file in CountingWindow")
-
-        vehicle_count, vehicle_info = vehicle_counter2(self.video_cap, self.mask, pixel_to_km_ratio)
+        # vehicle_count, vehicle_info = vehicle_counter2(self.video_cap, self.mask, pixel_to_km_ratio)
         self.vehicle_count_label.config(text=f"{vehicle_count} vehicles counted!")
 
         # Store the vehicle info for later use
@@ -286,25 +300,6 @@ class CountingWindow:
         except Exception as e:
             tk.messagebox.showerror("Error", f"An error occurred: {str(e)}")
 
-
-# class CountingWindow:
-#     def __init__(self, window, video_cap, mask, on_counting_window_close):
-#         self.window = window
-#         self.window.title("Vehicle Counting Window")
-
-#         self.video_cap = video_cap
-#         self.mask = mask
-
-#         self.vehicle_count_label = tk.Label(window, text="")
-#         self.vehicle_count_label.pack()
-
-#         self.count_vehicles()
-#         on_counting_window_close()
-
-#     def count_vehicles(self):
-#         # Call your custom vehicle_counter algorithm with the video_cap and mask
-#         vehicle_count = vehicle_counter2(self.video_cap, self.mask)
-#         self.vehicle_count_label.config(text=f"{vehicle_count} vehicles counted!")
 
 if __name__ == "__main__":
     root = tk.Tk()
